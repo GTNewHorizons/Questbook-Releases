@@ -1,13 +1,10 @@
 # GTNH Questbook Releases
 
-Questbook downloads for
-[GT New Horizons](https://github.com/GTNewHorizons/GT-New-Horizons-Modpack).
-
-[Download a questbook release](https://github.com/GTNewHorizons/Questbook-Releases/releases).
+Questbook downloads for [GT New Horizons](https://github.com/GTNewHorizons/GT-New-Horizons-Modpack).
 
 This repository packages the GTNH questbook into standalone ZIP archives.
-The questbook source is maintained in
-[`GTNewHorizons/GT-New-Horizons-Modpack`](https://github.com/GTNewHorizons/GT-New-Horizons-Modpack/tree/master/config/betterquesting).
+
+The questbook source is maintained in [`GTNewHorizons/GT-New-Horizons-Modpack`](https://github.com/GTNewHorizons/GT-New-Horizons-Modpack/tree/master/config/betterquesting).
 
 ## Installation
 
@@ -22,8 +19,7 @@ download GitHub's automatically generated **Source Code** archives.
 Delete the old folder before copying in the new one so files removed from the
 questbook do not remain behind.
 
-Each archive contains the complete `betterquesting/` folder at its root,
-including `DefaultQuests`, resources, and configuration.
+Doing this will NOT reset any player quest progress.
 
 ## Releases
 
