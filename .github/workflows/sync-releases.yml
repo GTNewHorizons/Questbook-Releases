@@ -1,0 +1,31 @@
+name: Sync GTNH releases
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: questbook-release-publication
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out release tooling
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Mirror new GTNH releases
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/release_tools.py sync \
+            --work-dir="$RUNNER_TEMP/questbook-sync"

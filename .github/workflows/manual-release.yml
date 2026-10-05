@@ -1,0 +1,84 @@
+name: Publish manual questbook release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Upstream GTNH branch, tag, or commit SHA
+        required: true
+        type: string
+      release_tag:
+        description: Tag to create in this repository
+        required: true
+        type: string
+      release_name:
+        description: Optional release name (defaults to the release tag)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: questbook-release-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out release tooling
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Fetch requested public GTNH ref
+        id: upstream
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          GIT_TERMINAL_PROMPT: "0"
+          GCM_INTERACTIVE: Never
+        run: |
+          set -euo pipefail
+          upstream_dir="$RUNNER_TEMP/gtnh-upstream"
+          mkdir -p "$upstream_dir"
+          git -C "$upstream_dir" init --quiet
+          git -C "$upstream_dir" sparse-checkout set config/betterquesting
+          git -C "$upstream_dir" fetch --depth=1 --no-tags --filter=blob:none -- \
+            https://github.com/GTNewHorizons/GT-New-Horizons-Modpack.git \
+            "$SOURCE_REF"
+          git -C "$upstream_dir" checkout --detach FETCH_HEAD
+          source_commit="$(git -C "$upstream_dir" rev-parse HEAD)"
+          printf 'upstream_dir=%s\n' "$upstream_dir" >> "$GITHUB_OUTPUT"
+          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Package questbook
+        id: package
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          UPSTREAM_DIR: ${{ steps.upstream.outputs.upstream_dir }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/release_tools.py package \
+            --source="$UPSTREAM_DIR" \
+            --release-tag="$RELEASE_TAG" \
+            --output-dir="$RUNNER_TEMP"
+
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_COMMIT: ${{ steps.upstream.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/release_tools.py publish-manual \
+            --archive="$ARCHIVE" \
+            --release-tag="$RELEASE_TAG" \
+            --release-name="$RELEASE_NAME" \
+            --source-ref="$SOURCE_REF" \
+            --source-commit="$SOURCE_COMMIT"
