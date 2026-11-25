@@ -85,27 +85,6 @@ def parse_mirror_marker(body: str | None) -> tuple[datetime, int] | None:
     return _timestamp(published_at, context="destination mirror marker"), release_id
 
 
-def select_releases_to_sync(
-    upstream: Sequence[Mapping[str, Any]],
-    downstream: Sequence[Mapping[str, Any]],
-) -> list[Mapping[str, Any]]:
-    """Select the latest upstream release if it is newer than the mirror."""
-    keyed_upstream = [(_release_key(item), item) for item in upstream]
-    if not keyed_upstream:
-        return []
-    latest_key, latest_release = max(keyed_upstream, key=lambda pair: pair[0])
-
-    watermarks: list[tuple[datetime, int]] = []
-    for destination_release in downstream:
-        marker = parse_mirror_marker(destination_release.get("body"))
-        if marker is not None:
-            watermarks.append(marker)
-
-    if watermarks and latest_key <= max(watermarks):
-        return []
-    return [latest_release]
-
-
 def select_asset(release: Mapping[str, Any]) -> Mapping[str, Any]:
     """Select an attached modpack ZIP without considering source archives."""
     tag = release.get("tag_name")
@@ -303,16 +282,6 @@ def _api_message(body: bytes) -> str:
     return message if isinstance(message, str) else "request failed"
 
 
-def _next_link(header: str | None) -> str | None:
-    if not header:
-        return None
-    for item in header.split(","):
-        match = re.match(r'\s*<([^>]+)>;\s*rel="([^"]+)"', item)
-        if match and match.group(2) == "next":
-            return match.group(1)
-    return None
-
-
 class GitHubClient:
     """Small GitHub REST client with explicit per-request authentication."""
 
@@ -418,32 +387,9 @@ class GitHubClient:
                 f"GitHub returned invalid JSON for {self._url(path_or_url)}"
             ) from error
 
-    def list_releases(
-        self, repository: str, *, token: str | None
-    ) -> list[Mapping[str, Any]]:
-        path: str | None = f"/repos/{repository}/releases?per_page=100"
-        releases: list[Mapping[str, Any]] = []
-        base = urlparse(self.base_url)
-        while path is not None:
-            payload, headers = self.request_json("GET", path, token=token)
-            if not isinstance(payload, list) or any(
-                not isinstance(item, Mapping) for item in payload
-            ):
-                raise ReleaseToolError(
-                    f"GitHub returned invalid release data for {repository}"
-                )
-            releases.extend(payload)
-            path = _next_link(headers.get("Link"))
-            if path is not None:
-                parsed = urlparse(path)
-                if (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc):
-                    raise ReleaseToolError("GitHub pagination pointed to another origin")
-        return releases
-
-    def get_release_by_tag(
-        self, repository: str, tag: str, *, token: str
+    def _get_release(
+        self, path: str, *, token: str | None = None
     ) -> Mapping[str, Any] | None:
-        path = f"/repos/{repository}/releases/tags/{quote(tag, safe='')}"
         try:
             payload, _ = self.request_json("GET", path, token=token)
         except GitHubAPIError as error:
@@ -451,8 +397,17 @@ class GitHubClient:
                 return None
             raise
         if not isinstance(payload, Mapping):
-            raise ReleaseToolError("GitHub returned invalid destination release data")
+            raise ReleaseToolError(f"GitHub returned invalid release data for {path}")
         return payload
+
+    def get_latest_release(self, repository: str) -> Mapping[str, Any] | None:
+        return self._get_release(f"/repos/{repository}/releases/latest")
+
+    def get_release_by_tag(
+        self, repository: str, tag: str, *, token: str
+    ) -> Mapping[str, Any] | None:
+        path = f"/repos/{repository}/releases/tags/{quote(tag, safe='')}"
+        return self._get_release(path, token=token)
 
     def get_tag_ref(
         self, repository: str, tag: str, *, token: str
@@ -685,67 +640,64 @@ def sync_command(args: argparse.Namespace) -> None:
     repository, token, target_commit = _destination_environment()
     client = GitHubClient()
     upstream_repository = "GTNewHorizons/GT-New-Horizons-Modpack"
-    upstream = client.list_releases(upstream_repository, token=None)
-    downstream = client.list_releases(repository, token=token)
-    selected = select_releases_to_sync(upstream, downstream)
-    if not selected:
-        _log("sync_complete", releases_published=0)
+    upstream_release = client.get_latest_release(upstream_repository)
+    if upstream_release is None:
+        _log("sync_complete", releases_published=0, reason="no_latest_release")
         return
-    work_dir = Path(args.work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-    for upstream_release in selected:
-        tag = str(upstream_release["tag_name"])
-        if check_automatic_destination(
-            client, repository, token, upstream_release
-        ):
-            _log("release_already_mirrored", tag=tag)
-            continue
-        upstream_asset = select_asset(upstream_release)
-        asset_id = upstream_asset.get("id")
-        asset_name = upstream_asset.get("name")
-        asset_size = upstream_asset.get("size")
-        download_url = upstream_asset.get("browser_download_url")
-        if (
-            not isinstance(asset_id, int)
-            or not isinstance(asset_name, str)
-            or not isinstance(asset_size, int)
-            or not isinstance(download_url, str)
-        ):
-            raise ReleaseToolError(f"upstream release {tag!r} has invalid asset data")
-        _log(
-            "selected_upstream_asset",
-            tag=tag,
-            release_id=upstream_release["id"],
-            asset_id=asset_id,
-            asset_name=asset_name,
-            asset_size=asset_size,
-        )
-        release_dir = work_dir / str(upstream_release["id"])
-        release_dir.mkdir(parents=True, exist_ok=True)
-        source_archive = release_dir / "upstream-modpack.zip"
-        output_name = f"GTNH-Questbook-{sanitize_tag(tag)}.zip"
-        output_archive = release_dir / output_name
-        download_file(download_url, source_archive)
-        file_count = build_questbook_zip(source_archive, output_archive)
-        release_name = upstream_release.get("name")
-        if not isinstance(release_name, str) or not release_name.strip():
-            release_name = tag
-        payload = {
-            "tag_name": tag,
-            "target_commitish": target_commit,
-            "name": release_name,
-            "body": automatic_notes(upstream_release, output_name),
-            "prerelease": bool(upstream_release.get("prerelease", False)),
-        }
-        publish_release(
-            client,
-            repository,
-            token,
-            payload,
-            output_archive,
-            idempotent_marker=_release_key(upstream_release),
-        )
-        _log("release_published", tag=tag, asset=output_name, files=file_count)
+    release_key = _release_key(upstream_release)
+    tag = str(upstream_release["tag_name"])
+    if tag.lower().endswith("-pre"):
+        _log("sync_complete", releases_published=0, reason="excluded_pre_tag", tag=tag)
+        return
+    if check_automatic_destination(client, repository, token, upstream_release):
+        _log("release_already_mirrored", tag=tag)
+        return
+    upstream_asset = select_asset(upstream_release)
+    asset_id = upstream_asset.get("id")
+    asset_name = upstream_asset.get("name")
+    asset_size = upstream_asset.get("size")
+    download_url = upstream_asset.get("browser_download_url")
+    if (
+        not isinstance(asset_id, int)
+        or not isinstance(asset_name, str)
+        or not isinstance(asset_size, int)
+        or not isinstance(download_url, str)
+    ):
+        raise ReleaseToolError(f"upstream release {tag!r} has invalid asset data")
+    _log(
+        "selected_upstream_asset",
+        tag=tag,
+        release_id=upstream_release["id"],
+        asset_id=asset_id,
+        asset_name=asset_name,
+        asset_size=asset_size,
+    )
+    release_dir = Path(args.work_dir) / str(upstream_release["id"])
+    release_dir.mkdir(parents=True, exist_ok=True)
+    source_archive = release_dir / "upstream-modpack.zip"
+    output_name = f"GTNH-Questbook-{sanitize_tag(tag)}.zip"
+    output_archive = release_dir / output_name
+    download_file(download_url, source_archive)
+    file_count = build_questbook_zip(source_archive, output_archive)
+    release_name = upstream_release.get("name")
+    if not isinstance(release_name, str) or not release_name.strip():
+        release_name = tag
+    payload = {
+        "tag_name": tag,
+        "target_commitish": target_commit,
+        "name": release_name,
+        "body": automatic_notes(upstream_release, output_name),
+        "prerelease": bool(upstream_release.get("prerelease", False)),
+    }
+    publish_release(
+        client,
+        repository,
+        token,
+        payload,
+        output_archive,
+        idempotent_marker=release_key,
+    )
+    _log("release_published", tag=tag, asset=output_name, files=file_count)
 
 
 def package_command(args: argparse.Namespace) -> None:

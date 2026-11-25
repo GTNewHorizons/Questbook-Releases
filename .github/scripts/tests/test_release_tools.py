@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 import tempfile
 import threading
 import unittest
 import zipfile
+from argparse import Namespace
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, unquote, urlparse
 
 
@@ -27,7 +32,7 @@ from release_tools import (  # noqa: E402
     publish_release,
     sanitize_tag,
     select_asset,
-    select_releases_to_sync,
+    sync_command,
     validate_git_tag,
 )
 
@@ -68,57 +73,6 @@ def asset(name: str, asset_id: int = 1) -> dict[str, object]:
         "size": 123,
         "browser_download_url": f"https://example.invalid/{name}",
     }
-
-
-class SynchronizationTests(unittest.TestCase):
-    def test_first_sync_selects_only_latest_release(self) -> None:
-        upstream = [
-            release(20, "old", "2026-09-08T12:00:00Z"),
-            release(30, "new", "2026-09-09T12:00:00Z"),
-        ]
-
-        selected = select_releases_to_sync(upstream, [])
-
-        self.assertEqual(["new"], [item["tag_name"] for item in selected])
-
-    def test_republished_old_tag_does_not_block_latest_nightly(self) -> None:
-        upstream = [
-            release(458361883, "2.10.0-nightly-2026-11-25", "2026-11-25T16:34:55Z"),
-            release(429909786, "2.9.0", "2026-10-31T12:02:23Z"),
-            release(457537472, "2.9.2", "2026-11-25T01:29:05Z"),
-        ]
-        downstream = [{"body": marker(429611152, "2026-10-31T00:20:11Z")}]
-
-        selected = select_releases_to_sync(upstream, downstream)
-
-        self.assertEqual(selected, [upstream[0]])
-
-    def test_release_id_breaks_equal_timestamp_ties(self) -> None:
-        timestamp = "2026-09-09T12:00:00Z"
-        upstream = [release(12, "new", timestamp), release(10, "old", timestamp)]
-        downstream = [{"body": marker(10, timestamp)}]
-
-        selected = select_releases_to_sync(upstream, downstream)
-
-        self.assertEqual(["new"], [item["tag_name"] for item in selected])
-
-    def test_rerun_after_mirror_selects_nothing(self) -> None:
-        timestamp = "2026-09-09T12:00:00Z"
-        upstream = [release(30, "current", timestamp)]
-        downstream = [{"body": marker(30, timestamp)}]
-
-        self.assertEqual([], select_releases_to_sync(upstream, downstream))
-
-    def test_malformed_mirror_marker_is_rejected(self) -> None:
-        downstream = [{"body": '<!-- gtnh-questbook-mirror:{"bad":true} -->'}]
-
-        with self.assertRaisesRegex(ReleaseToolError, "mirror marker"):
-            select_releases_to_sync(
-                [release(30, "current", "2026-09-09T12:00:00Z")], downstream
-            )
-
-    def test_parse_marker_ignores_ordinary_release_notes(self) -> None:
-        self.assertIsNone(parse_mirror_marker("Manual preview release"))
 
 
 class AssetSelectionTests(unittest.TestCase):
@@ -274,6 +228,13 @@ class ArchiveTests(unittest.TestCase):
 
 
 class NamingAndNotesTests(unittest.TestCase):
+    def test_malformed_mirror_marker_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ReleaseToolError, "mirror marker"):
+            parse_mirror_marker('<!-- gtnh-questbook-mirror:{"bad":true} -->')
+
+    def test_parse_marker_ignores_ordinary_release_notes(self) -> None:
+        self.assertIsNone(parse_mirror_marker("Manual preview release"))
+
     def test_filename_sanitization_preserves_safe_characters(self) -> None:
         self.assertEqual("release_branch-1.0", sanitize_tag("release/branch-1.0"))
 
@@ -306,6 +267,8 @@ class NamingAndNotesTests(unittest.TestCase):
 class FakeGitHubState:
     def __init__(self) -> None:
         self.authorization: list[tuple[str, str | None]] = []
+        self.upstream_latest: dict[str, object] | None = None
+        self.upstream_releases: list[dict[str, object]] = []
         self.destination_releases: dict[str, dict[str, object]] = {}
         self.destination_tags: set[str] = set()
         self.upload_status = 201
@@ -339,32 +302,22 @@ def handler_for(state: FakeGitHubState) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:
             self._record()
             parsed = urlparse(self.path)
+            upstream_path = "/repos/GTNewHorizons/GT-New-Horizons-Modpack/releases"
+            if parsed.path == f"{upstream_path}/latest":
+                if state.upstream_latest is None:
+                    self._json(404, {"message": "Not Found"})
+                else:
+                    self._json(200, state.upstream_latest)
+                return
+            if parsed.path == upstream_path:
+                self._json(200, state.upstream_releases)
+                return
             if parsed.path == "/retry":
                 state.retry_requests += 1
                 if state.retry_requests == 1:
                     self._json(503, {"message": "temporary"}, Retry_After="0")
                 else:
                     self._json(200, {"ok": True})
-                return
-            if parsed.path == "/repos/upstream/project/releases":
-                page = parse_qs(parsed.query).get("page", ["1"])[0]
-                if page == "1":
-                    next_url = (
-                        f"http://{self.headers['Host']}"
-                        "/repos/upstream/project/releases?per_page=100&page=2"
-                    )
-                    self._json(
-                        200,
-                        [release(1, "one", "2026-09-08T12:00:00Z")],
-                        Link=f'<{next_url}>; rel="next"',
-                    )
-                else:
-                    self._json(
-                        200, [release(2, "two", "2026-09-09T12:00:00Z")]
-                    )
-                return
-            if parsed.path == "/repos/destination/project/releases":
-                self._json(200, list(state.destination_releases.values()))
                 return
             release_prefix = "/repos/destination/project/releases/tags/"
             if parsed.path.startswith(release_prefix):
@@ -455,22 +408,75 @@ class GitHubClientTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join()
 
-    def test_paginated_listing_follows_link_and_upstream_is_anonymous(self) -> None:
-        releases = self.client.list_releases("upstream/project", token=None)
+    def run_sync(self) -> None:
+        def write_fixture_zip(url: str, target: Path) -> None:
+            with zipfile.ZipFile(target, "w") as archive:
+                archive.writestr("config/betterquesting/quest.txt", url)
 
-        self.assertEqual(["one", "two"], [item["tag_name"] for item in releases])
-        upstream_headers = [
-            auth for path, auth in self.state.authorization if "upstream" in path
+        with (
+            tempfile.TemporaryDirectory() as work_dir,
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_REPOSITORY": "destination/project",
+                    "GITHUB_TOKEN": "destination-token",
+                    "GITHUB_SHA": "a" * 40,
+                },
+            ),
+            patch("release_tools.GitHubClient", return_value=self.client),
+            patch("release_tools.download_file", side_effect=write_fixture_zip),
+            redirect_stdout(StringIO()),
+        ):
+            sync_command(Namespace(work_dir=work_dir))
+
+    def test_sync_uses_github_latest_even_when_another_release_is_newer(self) -> None:
+        latest = release(10, "v1", "2026-09-08T12:00:00Z", assets=[asset("v1.zip")])
+        later = release(30, "v3", "2026-09-10T12:00:00Z", assets=[asset("v3.zip")])
+        self.state.upstream_latest = latest
+        republished = release(25, "v2", "2026-09-09T16:00:00Z")
+        self.state.upstream_releases = [later, republished, latest]
+        self.state.destination_releases["v2"] = {
+            "tag_name": "v2",
+            "body": marker(20, "2026-09-09T12:00:00Z"),
+        }
+
+        self.run_sync()
+        self.run_sync()
+
+        self.assertEqual({"v1", "v2"}, set(self.state.destination_releases))
+        self.assertEqual(1, self.state.upload_requests)
+        upstream_requests = [
+            (path, auth)
+            for path, auth in self.state.authorization
+            if "GTNewHorizons" in path
         ]
-        self.assertEqual([None, None], upstream_headers)
+        self.assertEqual(
+            [("/repos/GTNewHorizons/GT-New-Horizons-Modpack/releases/latest", None)] * 2,
+            upstream_requests,
+        )
 
-    def test_destination_listing_uses_destination_token(self) -> None:
-        self.client.list_releases("destination/project", token="destination-token")
+    def test_sync_skips_latest_tag_with_pre_suffix(self) -> None:
+        preview = release(
+            20, "v2-pre", "2026-09-09T12:00:00Z", assets=[asset("v2-pre.zip")]
+        )
+        eligible = release(10, "v1", "2026-09-08T12:00:00Z", assets=[asset("v1.zip")])
+        self.state.upstream_latest = preview
+        self.state.upstream_releases = [preview, eligible]
 
-        destination_headers = [
-            auth for path, auth in self.state.authorization if "destination" in path
+        self.run_sync()
+
+        self.assertEqual({}, self.state.destination_releases)
+        self.assertEqual(0, self.state.upload_requests)
+
+    def test_sync_skips_when_github_has_no_latest_release(self) -> None:
+        self.state.upstream_releases = [
+            release(20, "v2", "2026-09-09T12:00:00Z", assets=[asset("v2.zip")])
         ]
-        self.assertEqual(["Bearer destination-token"], destination_headers)
+
+        self.run_sync()
+
+        self.assertEqual({}, self.state.destination_releases)
+        self.assertEqual(0, self.state.upload_requests)
 
     def test_transient_server_failure_is_retried(self) -> None:
         payload, _ = self.client.request_json("GET", "/retry")

@@ -23,10 +23,11 @@ Doing this will NOT reset any player quest progress.
 
 ## Releases
 
-Each scheduled check picks the most recently published GTNH modpack release.
-If it is newer than the last automatic mirror, the workflow extracts the
-questbook from the attached modpack ZIP. This preserves the shipped questbook,
-including release-time version stamping.
+Each scheduled check reads the GTNH modpack release marked **Latest** on
+GitHub. If there is no Latest release, its tag ends in `-pre`, or it has
+already been mirrored, the check skips publication. Otherwise the workflow
+extracts the questbook from the attached modpack ZIP, preserving release-time
+version stamping.
 
 Manual preview releases can be built from an upstream branch, tag, or commit.
 Their release notes identify the requested ref and resolved commit.
