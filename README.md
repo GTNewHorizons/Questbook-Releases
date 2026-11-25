@@ -23,10 +23,10 @@ Doing this will NOT reset any player quest progress.
 
 ## Releases
 
-GTNH modpack releases are mirrored automatically from their published ZIP
-artifacts. This preserves the questbook shipped with each version, including
-release-time version stamping. Automatic mirroring follows new upstream
-releases; it does not backfill older versions.
+Each scheduled check picks the most recently published GTNH modpack release.
+If it is newer than the last automatic mirror, the workflow extracts the
+questbook from the attached modpack ZIP. This preserves the shipped questbook,
+including release-time version stamping.
 
 Manual preview releases can be built from an upstream branch, tag, or commit.
 Their release notes identify the requested ref and resolved commit.

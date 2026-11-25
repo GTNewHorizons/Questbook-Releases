@@ -89,10 +89,11 @@ def select_releases_to_sync(
     upstream: Sequence[Mapping[str, Any]],
     downstream: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
-    """Select first-run latest or all releases after the newest watermark."""
+    """Select the latest upstream release if it is newer than the mirror."""
     keyed_upstream = [(_release_key(item), item) for item in upstream]
     if not keyed_upstream:
         return []
+    latest_key, latest_release = max(keyed_upstream, key=lambda pair: pair[0])
 
     watermarks: list[tuple[datetime, int]] = []
     for destination_release in downstream:
@@ -100,12 +101,9 @@ def select_releases_to_sync(
         if marker is not None:
             watermarks.append(marker)
 
-    if not watermarks:
-        return [max(keyed_upstream, key=lambda pair: pair[0])[1]]
-
-    newest_watermark = max(watermarks)
-    selected = [pair for pair in keyed_upstream if pair[0] > newest_watermark]
-    return [item for _, item in sorted(selected, key=lambda pair: pair[0])]
+    if watermarks and latest_key <= max(watermarks):
+        return []
+    return [latest_release]
 
 
 def select_asset(release: Mapping[str, Any]) -> Mapping[str, Any]:

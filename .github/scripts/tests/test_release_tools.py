@@ -81,19 +81,17 @@ class SynchronizationTests(unittest.TestCase):
 
         self.assertEqual(["new"], [item["tag_name"] for item in selected])
 
-    def test_later_sync_selects_every_new_release_oldest_first(self) -> None:
+    def test_republished_old_tag_does_not_block_latest_nightly(self) -> None:
         upstream = [
-            release(30, "third", "2026-09-09T12:00:00Z"),
-            release(10, "first", "2026-09-09T10:00:00Z"),
-            release(20, "second", "2026-09-09T11:00:00Z"),
+            release(458361883, "2.10.0-nightly-2026-11-25", "2026-11-25T16:34:55Z"),
+            release(429909786, "2.9.0", "2026-10-31T12:02:23Z"),
+            release(457537472, "2.9.2", "2026-11-25T01:29:05Z"),
         ]
-        downstream = [{"body": marker(10, "2026-09-09T10:00:00Z")}]
+        downstream = [{"body": marker(429611152, "2026-10-31T00:20:11Z")}]
 
         selected = select_releases_to_sync(upstream, downstream)
 
-        self.assertEqual(
-            ["second", "third"], [item["tag_name"] for item in selected]
-        )
+        self.assertEqual(selected, [upstream[0]])
 
     def test_release_id_breaks_equal_timestamp_ties(self) -> None:
         timestamp = "2026-09-09T12:00:00Z"
