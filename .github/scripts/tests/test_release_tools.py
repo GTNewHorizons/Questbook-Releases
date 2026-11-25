@@ -304,6 +304,13 @@ def handler_for(state: FakeGitHubState) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             upstream_path = "/repos/GTNewHorizons/GT-New-Horizons-Modpack/releases"
             if parsed.path == f"{upstream_path}/latest":
+                if self.headers.get("Authorization") is None:
+                    self._json(
+                        403,
+                        {"message": "API rate limit exceeded for the runner IP"},
+                        X_RateLimit_Remaining="0",
+                    )
+                    return
                 if state.upstream_latest is None:
                     self._json(404, {"message": "Not Found"})
                 else:
@@ -451,7 +458,12 @@ class GitHubClientTests(unittest.TestCase):
             if "GTNewHorizons" in path
         ]
         self.assertEqual(
-            [("/repos/GTNewHorizons/GT-New-Horizons-Modpack/releases/latest", None)] * 2,
+            [
+                (
+                    "/repos/GTNewHorizons/GT-New-Horizons-Modpack/releases/latest",
+                    "Bearer destination-token",
+                )
+            ] * 2,
             upstream_requests,
         )
 

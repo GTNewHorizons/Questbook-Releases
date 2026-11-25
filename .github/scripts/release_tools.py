@@ -400,8 +400,10 @@ class GitHubClient:
             raise ReleaseToolError(f"GitHub returned invalid release data for {path}")
         return payload
 
-    def get_latest_release(self, repository: str) -> Mapping[str, Any] | None:
-        return self._get_release(f"/repos/{repository}/releases/latest")
+    def get_latest_release(
+        self, repository: str, *, token: str
+    ) -> Mapping[str, Any] | None:
+        return self._get_release(f"/repos/{repository}/releases/latest", token=token)
 
     def get_release_by_tag(
         self, repository: str, tag: str, *, token: str
@@ -640,7 +642,7 @@ def sync_command(args: argparse.Namespace) -> None:
     repository, token, target_commit = _destination_environment()
     client = GitHubClient()
     upstream_repository = "GTNewHorizons/GT-New-Horizons-Modpack"
-    upstream_release = client.get_latest_release(upstream_repository)
+    upstream_release = client.get_latest_release(upstream_repository, token=token)
     if upstream_release is None:
         _log("sync_complete", releases_published=0, reason="no_latest_release")
         return
